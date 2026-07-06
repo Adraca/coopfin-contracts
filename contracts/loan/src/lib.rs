@@ -4,6 +4,18 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, token, Address, Env, Symbol, Vec, String,
 };
 
+/// ─── Storage TTL ─────────────────────────────────────────────────────────────
+///
+/// Soroban charges rent on stored entries and evicts them once their TTL
+/// elapses unless bumped. This contract keeps loan state in instance storage,
+/// so it is extended at the start of every state-changing call. Stellar closes
+/// a ledger roughly every 5 seconds (one day ≈ 17_280 ledgers); instance state
+/// is kept alive for ~30 days, with the threshold one day below the target so a
+/// bump only pays rent when the entry is within a day of expiry.
+const DAY_IN_LEDGERS: u32 = 17_280;
+const INSTANCE_BUMP_LEDGERS: u32 = 30 * DAY_IN_LEDGERS;
+const INSTANCE_TTL_THRESHOLD: u32 = INSTANCE_BUMP_LEDGERS - DAY_IN_LEDGERS;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -54,6 +66,7 @@ impl LoanContract {
         env.storage().instance().set(&DataKey::AssetAddress, &asset);
         env.storage().instance().set(&DataKey::LoanCounter, &0u32);
         env.storage().instance().set(&DataKey::Loans, &Vec::<Loan>::new(&env));
+        Self::bump_instance(&env);
     }
 
     /// Member submits a loan request.
@@ -65,6 +78,7 @@ impl LoanContract {
         repayment_days: u32,
     ) -> u32 {
         borrower.require_auth();
+        Self::bump_instance(&env);
         if amount <= 0 { panic!("amount must be positive"); }
 
         let counter: u32 = env.storage().instance()
@@ -104,6 +118,7 @@ impl LoanContract {
     pub fn approve_loan(env: Env, admin: Address, loan_id: u32) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::bump_instance(&env);
 
         let mut loans: Vec<Loan> = env.storage().instance()
             .get(&DataKey::Loans).unwrap();
@@ -138,6 +153,7 @@ impl LoanContract {
     /// Borrower repays (partial or full).
     pub fn repay(env: Env, borrower: Address, loan_id: u32, amount: i128) {
         borrower.require_auth();
+        Self::bump_instance(&env);
 
         let mut loans: Vec<Loan> = env.storage().instance()
             .get(&DataKey::Loans).unwrap();
@@ -185,6 +201,14 @@ impl LoanContract {
             .get(&DataKey::Loans).unwrap();
         let idx = Self::find_loan_idx(&loans, loan_id);
         loans.get(idx).unwrap()
+    }
+
+    /// Extend the contract's instance-storage TTL. Called at the start of every
+    /// state-changing entrypoint so active loan records are never evicted.
+    fn bump_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_BUMP_LEDGERS);
     }
 
     fn require_admin(env: &Env, caller: &Address) {

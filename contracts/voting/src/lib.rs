@@ -4,6 +4,24 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec, String,
 };
 
+/// ─── Storage TTL ─────────────────────────────────────────────────────────────
+///
+/// Soroban charges rent on stored entries and evicts them once their
+/// time-to-live (TTL) elapses unless it is explicitly bumped. Instance storage
+/// (admin, proposal list, counter) and persistent storage (per-proposal vote
+/// maps) would otherwise be silently deleted, so both are extended on state
+/// changes.
+///
+/// Stellar closes a ledger roughly every 5 seconds, so one day ≈ 17_280
+/// ledgers. Instance config is kept alive for ~30 days; vote maps — the record
+/// of who voted — for ~90 days. The threshold is set one day below the target
+/// so a bump only pays rent when the entry is within a day of expiry.
+const DAY_IN_LEDGERS: u32 = 17_280;
+const INSTANCE_BUMP_LEDGERS: u32 = 30 * DAY_IN_LEDGERS;
+const INSTANCE_TTL_THRESHOLD: u32 = INSTANCE_BUMP_LEDGERS - DAY_IN_LEDGERS;
+const PERSISTENT_BUMP_LEDGERS: u32 = 90 * DAY_IN_LEDGERS;
+const PERSISTENT_TTL_THRESHOLD: u32 = PERSISTENT_BUMP_LEDGERS - DAY_IN_LEDGERS;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -62,6 +80,7 @@ impl VotingContract {
         env.storage().instance().set(&DataKey::TreasuryContract, &treasury);
         env.storage().instance().set(&DataKey::ProposalCounter, &0u32);
         env.storage().instance().set(&DataKey::Proposals, &Vec::<Proposal>::new(&env));
+        Self::bump_instance(&env);
     }
 
     /// Create a new governance proposal.
@@ -76,6 +95,7 @@ impl VotingContract {
         payload: String,
     ) -> u32 {
         proposer.require_auth();
+        Self::bump_instance(&env);
 
         let counter: u32 = env.storage().instance()
             .get(&DataKey::ProposalCounter).unwrap_or(0);
@@ -108,6 +128,11 @@ impl VotingContract {
         // Initialize empty vote map for this proposal
         env.storage().persistent()
             .set(&DataKey::Votes(id), &Map::<Address, bool>::new(&env));
+        env.storage().persistent().extend_ttl(
+            &DataKey::Votes(id),
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_BUMP_LEDGERS,
+        );
 
         env.events().publish(
             (Symbol::new(&env, "proposal_created"),),
@@ -119,6 +144,7 @@ impl VotingContract {
     /// Member casts a vote on a proposal.
     pub fn vote(env: Env, voter: Address, proposal_id: u32, approve: bool) {
         voter.require_auth();
+        Self::bump_instance(&env);
 
         let mut proposals: Vec<Proposal> = env.storage().instance()
             .get(&DataKey::Proposals).unwrap();
@@ -142,6 +168,11 @@ impl VotingContract {
 
         votes.set(voter.clone(), approve);
         env.storage().persistent().set(&DataKey::Votes(proposal_id), &votes);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Votes(proposal_id),
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_BUMP_LEDGERS,
+        );
 
         if approve {
             proposal.votes_for += 1;
@@ -160,6 +191,8 @@ impl VotingContract {
 
     /// Finalize a proposal after deadline.
     pub fn finalize(env: Env, proposal_id: u32) -> ProposalStatus {
+        Self::bump_instance(&env);
+
         let mut proposals: Vec<Proposal> = env.storage().instance()
             .get(&DataKey::Proposals).unwrap();
         let idx = Self::find_proposal_idx(&proposals, proposal_id);
@@ -202,6 +235,15 @@ impl VotingContract {
         env.storage().persistent()
             .get(&DataKey::Votes(proposal_id))
             .unwrap_or(Map::new(&env))
+    }
+
+    /// Extend the contract's instance-storage TTL. Called at the start of every
+    /// state-changing entrypoint so an active group never loses its proposals.
+    /// Read-only getters intentionally do not bump.
+    fn bump_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_BUMP_LEDGERS);
     }
 
     fn find_proposal_idx(proposals: &Vec<Proposal>, id: u32) -> u32 {

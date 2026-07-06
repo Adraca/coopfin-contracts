@@ -4,6 +4,25 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, token, Address, Env, Symbol, Vec, String,
 };
 
+/// ─── Storage TTL ─────────────────────────────────────────────────────────────
+///
+/// Soroban charges rent on stored entries and evicts them once their
+/// time-to-live (TTL) elapses unless it is explicitly bumped. Instance storage
+/// (admin, members, totals) and persistent storage (per-member contribution
+/// history) would therefore be silently deleted on an inactive group, so both
+/// are extended whenever state changes.
+///
+/// Stellar closes a ledger roughly every 5 seconds, so one day ≈ 17_280
+/// ledgers. Instance config is kept alive for ~30 days; contribution history —
+/// long-lived financial data — for ~90 days. The threshold is set one day below
+/// the target so a bump only pays rent when the entry is within a day of
+/// expiry, rather than on every single call.
+const DAY_IN_LEDGERS: u32 = 17_280;
+const INSTANCE_BUMP_LEDGERS: u32 = 30 * DAY_IN_LEDGERS;
+const INSTANCE_TTL_THRESHOLD: u32 = INSTANCE_BUMP_LEDGERS - DAY_IN_LEDGERS;
+const PERSISTENT_BUMP_LEDGERS: u32 = 90 * DAY_IN_LEDGERS;
+const PERSISTENT_TTL_THRESHOLD: u32 = PERSISTENT_BUMP_LEDGERS - DAY_IN_LEDGERS;
+
 /// ─── Storage Keys ────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -81,6 +100,8 @@ impl TreasuryContract {
         env.storage().instance().set(&DataKey::IsActive, &true);
         env.storage().instance().set(&DataKey::Members, &Vec::<Address>::new(&env));
 
+        Self::bump_instance(&env);
+
         GroupInfo {
             name: group_name,
             admin,
@@ -95,6 +116,7 @@ impl TreasuryContract {
     pub fn add_member(env: Env, admin: Address, member: Address) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::bump_instance(&env);
 
         let mut members: Vec<Address> = env
             .storage().instance()
@@ -115,6 +137,7 @@ impl TreasuryContract {
     pub fn contribute(env: Env, member: Address, amount: i128, period: u32) {
         member.require_auth();
         Self::require_member(&env, &member);
+        Self::bump_instance(&env);
 
         if amount <= 0 {
             panic!("amount must be positive");
@@ -141,6 +164,12 @@ impl TreasuryContract {
         history.push_back(record);
         env.storage().persistent()
             .set(&DataKey::Contributions(member.clone()), &history);
+        // Keep this member's contribution history alive against TTL eviction.
+        env.storage().persistent().extend_ttl(
+            &DataKey::Contributions(member.clone()),
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_BUMP_LEDGERS,
+        );
 
         // Update total
         let total: i128 = env.storage().instance()
@@ -158,6 +187,7 @@ impl TreasuryContract {
     pub fn withdraw(env: Env, admin: Address, to: Address, amount: i128) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::bump_instance(&env);
 
         let asset: Address = env.storage().instance().get(&DataKey::AssetAddress).unwrap();
         let token_client = token::Client::new(&env, &asset);
@@ -253,6 +283,16 @@ impl TreasuryContract {
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────
+
+    /// Extend the contract's instance-storage TTL. Called at the start of every
+    /// state-changing entrypoint so an active group never loses its config.
+    /// Read-only getters intentionally do not bump, keeping them cheap and free
+    /// of state writes.
+    fn bump_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_BUMP_LEDGERS);
+    }
 
     fn require_admin(env: &Env, caller: &Address) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();

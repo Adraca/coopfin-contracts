@@ -1,8 +1,20 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, Env, Symbol, Vec,
+    contract, contractimpl, contracttype, token, Address, Env, String, Symbol, Vec,
 };
+
+/// ─── Storage TTL ─────────────────────────────────────────────────────────────
+///
+/// Soroban charges rent on stored entries and evicts them once their TTL
+/// elapses unless bumped. Distribution history lives in instance storage, so it
+/// is extended at the start of every state-changing call. Stellar closes a
+/// ledger roughly every 5 seconds (one day ≈ 17_280 ledgers); instance state is
+/// kept alive for ~30 days, with the threshold one day below the target so a
+/// bump only pays rent when the entry is within a day of expiry.
+const DAY_IN_LEDGERS: u32 = 17_280;
+const INSTANCE_BUMP_LEDGERS: u32 = 30 * DAY_IN_LEDGERS;
+const INSTANCE_TTL_THRESHOLD: u32 = INSTANCE_BUMP_LEDGERS - DAY_IN_LEDGERS;
 
 #[contracttype]
 #[derive(Clone)]
@@ -39,6 +51,7 @@ impl DividendContract {
         env.storage().instance().set(&DataKey::DistributionCounter, &0u32);
         env.storage().instance()
             .set(&DataKey::Distributions, &Vec::<Distribution>::new(&env));
+        Self::bump_instance(&env);
     }
 
     /// Distribute profit proportionally based on each member's share weight.
@@ -55,6 +68,7 @@ impl DividendContract {
     ) -> u32 {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::bump_instance(&env);
 
         if recipients.len() != shares.len() {
             panic!("recipients and shares length mismatch");
@@ -113,6 +127,14 @@ impl DividendContract {
         env.storage().instance()
             .get(&DataKey::Distributions)
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// Extend the contract's instance-storage TTL. Called at the start of every
+    /// state-changing entrypoint so distribution history is never evicted.
+    fn bump_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_BUMP_LEDGERS);
     }
 
     fn require_admin(env: &Env, caller: &Address) {

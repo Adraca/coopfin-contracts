@@ -4,6 +4,18 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, Address, Env, Symbol, Vec,
 };
 
+/// ─── Storage TTL ─────────────────────────────────────────────────────────────
+///
+/// Soroban charges rent on stored entries and evicts them once their TTL
+/// elapses unless bumped. Group rules live in instance storage, so it is
+/// extended at the start of every state-changing call. Stellar closes a ledger
+/// roughly every 5 seconds (one day ≈ 17_280 ledgers); instance state is kept
+/// alive for ~30 days, with the threshold one day below the target so a bump
+/// only pays rent when the entry is within a day of expiry.
+const DAY_IN_LEDGERS: u32 = 17_280;
+const INSTANCE_BUMP_LEDGERS: u32 = 30 * DAY_IN_LEDGERS;
+const INSTANCE_TTL_THRESHOLD: u32 = INSTANCE_BUMP_LEDGERS - DAY_IN_LEDGERS;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -55,17 +67,27 @@ impl GovernanceContract {
             late_penalty_bps: 200,             // 2% penalty
         };
         env.storage().instance().set(&DataKey::Rules, &rules);
+        Self::bump_instance(&env);
     }
 
     pub fn update_rules(env: Env, admin: Address, rules: CoopRules) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::bump_instance(&env);
         env.storage().instance().set(&DataKey::Rules, &rules);
         env.events().publish((Symbol::new(&env, "rules_updated"),), ());
     }
 
     pub fn get_rules(env: Env) -> CoopRules {
         env.storage().instance().get(&DataKey::Rules).unwrap()
+    }
+
+    /// Extend the contract's instance-storage TTL. Called at the start of every
+    /// state-changing entrypoint so the group's rules are never evicted.
+    fn bump_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_BUMP_LEDGERS);
     }
 
     fn require_admin(env: &Env, caller: &Address) {
