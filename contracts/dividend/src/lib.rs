@@ -1,8 +1,13 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, Env, Symbol, Vec,
+    contract, contractimpl, contracttype, token, Address, Env, String, Symbol, Vec,
 };
+
+/// ─── TTL Constants ──────────────────────────────────────────────────────────
+const LEDGERS_PER_DAY: u32 = 17_280;
+const INSTANCE_TTL_THRESHOLD: u32 = 30 * LEDGERS_PER_DAY;
+const INSTANCE_TTL_EXTEND_TO: u32 = 180 * LEDGERS_PER_DAY;
 
 #[contracttype]
 #[derive(Clone)]
@@ -33,6 +38,7 @@ pub struct DividendContract;
 impl DividendContract {
     pub fn initialize(env: Env, admin: Address, asset: Address, treasury: Address) {
         admin.require_auth();
+        Self::bump_instance(&env);
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::AssetAddress, &asset);
         env.storage().instance().set(&DataKey::TreasuryContract, &treasury);
@@ -55,6 +61,7 @@ impl DividendContract {
     ) -> u32 {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::bump_instance(&env);
 
         if recipients.len() != shares.len() {
             panic!("recipients and shares length mismatch");
@@ -113,6 +120,16 @@ impl DividendContract {
         env.storage().instance()
             .get(&DataKey::Distributions)
             .unwrap_or(Vec::new(&env))
+    }
+
+    /// Bump the instance storage TTL to prevent the contract from expiring.
+    /// Called at the start of every state-changing function.
+    ///
+    /// Threshold: 30 days (518,400 ledgers); Extend to: 180 days (3,110,400 ledgers).
+    fn bump_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     }
 
     fn require_admin(env: &Env, caller: &Address) {

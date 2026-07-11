@@ -4,6 +4,22 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, Address, Env, Map, Symbol, Vec, String,
 };
 
+/// ─── TTL Constants ──────────────────────────────────────────────────────────
+/// Number of ledgers in one day (approximate, based on ~5s ledger close time).
+const LEDGERS_PER_DAY: u32 = 17_280;
+
+/// Extend instance storage TTL when it drops below this threshold (30 days).
+const INSTANCE_TTL_THRESHOLD: u32 = 30 * LEDGERS_PER_DAY;
+
+/// Extend instance storage TTL to this many ledgers (180 days ≈ 6 months).
+const INSTANCE_TTL_EXTEND_TO: u32 = 180 * LEDGERS_PER_DAY;
+
+/// Extend persistent entry TTL when it drops below this threshold (30 days).
+const PERSISTENT_TTL_THRESHOLD: u32 = 30 * LEDGERS_PER_DAY;
+
+/// Extend persistent entry TTL to this many ledgers (180 days ≈ 6 months).
+const PERSISTENT_TTL_EXTEND_TO: u32 = 180 * LEDGERS_PER_DAY;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -58,6 +74,7 @@ pub struct VotingContract;
 impl VotingContract {
     pub fn initialize(env: Env, admin: Address, treasury: Address) {
         admin.require_auth();
+        Self::bump_instance(&env);
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::TreasuryContract, &treasury);
         env.storage().instance().set(&DataKey::ProposalCounter, &0u32);
@@ -76,6 +93,7 @@ impl VotingContract {
         payload: String,
     ) -> u32 {
         proposer.require_auth();
+        Self::bump_instance(&env);
 
         let counter: u32 = env.storage().instance()
             .get(&DataKey::ProposalCounter).unwrap_or(0);
@@ -109,6 +127,16 @@ impl VotingContract {
         env.storage().persistent()
             .set(&DataKey::Votes(id), &Map::<Address, bool>::new(&env));
 
+        // Extend TTL for the new vote entry so it survives the full
+        // voting period plus a grace window after finalization.
+        env.storage()
+            .persistent()
+            .extend_ttl(
+                &DataKey::Votes(id),
+                PERSISTENT_TTL_THRESHOLD,
+                PERSISTENT_TTL_EXTEND_TO,
+            );
+
         env.events().publish(
             (Symbol::new(&env, "proposal_created"),),
             (id, proposer),
@@ -119,6 +147,7 @@ impl VotingContract {
     /// Member casts a vote on a proposal.
     pub fn vote(env: Env, voter: Address, proposal_id: u32, approve: bool) {
         voter.require_auth();
+        Self::bump_instance(&env);
 
         let mut proposals: Vec<Proposal> = env.storage().instance()
             .get(&DataKey::Proposals).unwrap();
@@ -143,6 +172,16 @@ impl VotingContract {
         votes.set(voter.clone(), approve);
         env.storage().persistent().set(&DataKey::Votes(proposal_id), &votes);
 
+        // Extend TTL for the vote map so tally records survive through
+        // the voting window and the post-finalization query period.
+        env.storage()
+            .persistent()
+            .extend_ttl(
+                &DataKey::Votes(proposal_id),
+                PERSISTENT_TTL_THRESHOLD,
+                PERSISTENT_TTL_EXTEND_TO,
+            );
+
         if approve {
             proposal.votes_for += 1;
         } else {
@@ -160,6 +199,7 @@ impl VotingContract {
 
     /// Finalize a proposal after deadline.
     pub fn finalize(env: Env, proposal_id: u32) -> ProposalStatus {
+        Self::bump_instance(&env);
         let mut proposals: Vec<Proposal> = env.storage().instance()
             .get(&DataKey::Proposals).unwrap();
         let idx = Self::find_proposal_idx(&proposals, proposal_id);
@@ -202,6 +242,19 @@ impl VotingContract {
         env.storage().persistent()
             .get(&DataKey::Votes(proposal_id))
             .unwrap_or(Map::new(&env))
+    }
+
+    // ── TTL helpers ──────────────────────────────────────────────────────────
+
+    /// Bump the instance storage TTL to prevent the contract from expiring.
+    /// Called at the start of every state-changing function.
+    ///
+    /// Threshold: 30 days (518,400 ledgers) — only extend when TTL falls below.
+    /// Extend to: 180 days (3,110,400 ledgers) — ~6 months of ledger lifetime.
+    fn bump_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     }
 
     fn find_proposal_idx(proposals: &Vec<Proposal>, id: u32) -> u32 {

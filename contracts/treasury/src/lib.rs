@@ -4,6 +4,22 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, token, Address, Env, Symbol, Vec, String,
 };
 
+/// ─── TTL Constants ──────────────────────────────────────────────────────────
+/// Number of ledgers in one day (approximate, based on ~5s ledger close time).
+const LEDGERS_PER_DAY: u32 = 17_280;
+
+/// Extend instance storage TTL when it drops below this threshold (30 days).
+const INSTANCE_TTL_THRESHOLD: u32 = 30 * LEDGERS_PER_DAY;
+
+/// Extend instance storage TTL to this many ledgers (180 days ≈ 6 months).
+const INSTANCE_TTL_EXTEND_TO: u32 = 180 * LEDGERS_PER_DAY;
+
+/// Extend persistent entry TTL when it drops below this threshold (30 days).
+const PERSISTENT_TTL_THRESHOLD: u32 = 30 * LEDGERS_PER_DAY;
+
+/// Extend persistent entry TTL to this many ledgers (180 days ≈ 6 months).
+const PERSISTENT_TTL_EXTEND_TO: u32 = 180 * LEDGERS_PER_DAY;
+
 /// ─── Storage Keys ────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -69,6 +85,7 @@ impl TreasuryContract {
         asset: Address,
     ) -> GroupInfo {
         admin.require_auth();
+        Self::bump_instance(&env);
 
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
@@ -95,6 +112,7 @@ impl TreasuryContract {
     pub fn add_member(env: Env, admin: Address, member: Address) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::bump_instance(&env);
 
         let mut members: Vec<Address> = env
             .storage().instance()
@@ -115,6 +133,7 @@ impl TreasuryContract {
     pub fn contribute(env: Env, member: Address, amount: i128, period: u32) {
         member.require_auth();
         Self::require_member(&env, &member);
+        Self::bump_instance(&env);
 
         if amount <= 0 {
             panic!("amount must be positive");
@@ -142,6 +161,18 @@ impl TreasuryContract {
         env.storage().persistent()
             .set(&DataKey::Contributions(member.clone()), &history);
 
+        // Extend the TTL of this member's contribution history so it isn't
+        // silently deleted by the network. Members who contribute regularly
+        // keep their history alive; stale entries from inactive members will
+        // naturally expire.
+        env.storage()
+            .persistent()
+            .extend_ttl(
+                &DataKey::Contributions(member.clone()),
+                PERSISTENT_TTL_THRESHOLD,
+                PERSISTENT_TTL_EXTEND_TO,
+            );
+
         // Update total
         let total: i128 = env.storage().instance()
             .get(&DataKey::TotalContributions).unwrap_or(0);
@@ -158,6 +189,7 @@ impl TreasuryContract {
     pub fn withdraw(env: Env, admin: Address, to: Address, amount: i128) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::bump_instance(&env);
 
         let asset: Address = env.storage().instance().get(&DataKey::AssetAddress).unwrap();
         let token_client = token::Client::new(&env, &asset);
@@ -250,6 +282,19 @@ impl TreasuryContract {
             last_period,
             last_contributed_at,
         }
+    }
+
+    // ── TTL helpers ──────────────────────────────────────────────────────────
+
+    /// Bump the instance storage TTL to prevent the contract from expiring.
+    /// Called at the start of every state-changing function.
+    ///
+    /// Threshold: 30 days (518,400 ledgers) — only extend when TTL falls below.
+    /// Extend to: 180 days (3,110,400 ledgers) — ~6 months of ledger lifetime.
+    fn bump_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     }
 
     // ── Internal helpers ─────────────────────────────────────────────────────

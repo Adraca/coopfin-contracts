@@ -4,6 +4,16 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, token, Address, Env, Symbol, Vec, String,
 };
 
+/// ─── TTL Constants ──────────────────────────────────────────────────────────
+/// Number of ledgers in one day (approximate, based on ~5s ledger close time).
+const LEDGERS_PER_DAY: u32 = 17_280;
+
+/// Extend instance storage TTL when it drops below this threshold (30 days).
+const INSTANCE_TTL_THRESHOLD: u32 = 30 * LEDGERS_PER_DAY;
+
+/// Extend instance storage TTL to this many ledgers (180 days ≈ 6 months).
+const INSTANCE_TTL_EXTEND_TO: u32 = 180 * LEDGERS_PER_DAY;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -46,6 +56,7 @@ pub struct LoanContract;
 impl LoanContract {
     pub fn initialize(env: Env, admin: Address, treasury: Address, asset: Address) {
         admin.require_auth();
+        Self::bump_instance(&env);
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
         }
@@ -65,6 +76,7 @@ impl LoanContract {
         repayment_days: u32,
     ) -> u32 {
         borrower.require_auth();
+        Self::bump_instance(&env);
         if amount <= 0 { panic!("amount must be positive"); }
 
         let counter: u32 = env.storage().instance()
@@ -104,6 +116,7 @@ impl LoanContract {
     pub fn approve_loan(env: Env, admin: Address, loan_id: u32) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::bump_instance(&env);
 
         let mut loans: Vec<Loan> = env.storage().instance()
             .get(&DataKey::Loans).unwrap();
@@ -138,6 +151,7 @@ impl LoanContract {
     /// Borrower repays (partial or full).
     pub fn repay(env: Env, borrower: Address, loan_id: u32, amount: i128) {
         borrower.require_auth();
+        Self::bump_instance(&env);
 
         let mut loans: Vec<Loan> = env.storage().instance()
             .get(&DataKey::Loans).unwrap();
@@ -185,6 +199,19 @@ impl LoanContract {
             .get(&DataKey::Loans).unwrap();
         let idx = Self::find_loan_idx(&loans, loan_id);
         loans.get(idx).unwrap()
+    }
+
+    // ── TTL helpers ──────────────────────────────────────────────────────────
+
+    /// Bump the instance storage TTL to prevent the contract from expiring.
+    /// Called at the start of every state-changing function.
+    ///
+    /// Threshold: 30 days (518,400 ledgers) — only extend when TTL falls below.
+    /// Extend to: 180 days (3,110,400 ledgers) — ~6 months of ledger lifetime.
+    fn bump_instance(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     }
 
     fn require_admin(env: &Env, caller: &Address) {
