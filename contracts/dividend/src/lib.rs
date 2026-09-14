@@ -1,5 +1,10 @@
 #![no_std]
 
+//! Dividend Distribution Module
+//!
+//! Manages profit distributions to cooperative members. Allows admins to distribute profits
+//! proportionally based on member share weights, records distributions, and emits events.
+
 use soroban_sdk::{
     contract, contractimpl, contracttype, token, Address, Env, String, Symbol, Vec,
 };
@@ -36,6 +41,19 @@ pub struct DividendContract;
 
 #[contractimpl]
 impl DividendContract {
+    /// Initializes the dividend contract with admin, asset, and treasury addresses.
+    ///
+    /// # Authorization
+    /// * The `admin` address must authorize the transaction.
+    ///
+    /// # Panics
+    /// * If `admin` does not authorize the transaction.
+    ///
+    /// # Events
+    /// * None.
+    ///
+    /// # Return
+    /// * None.
     pub fn initialize(env: Env, admin: Address, asset: Address, treasury: Address) {
         admin.require_auth();
         Self::bump_instance(&env);
@@ -47,10 +65,25 @@ impl DividendContract {
             .set(&DataKey::Distributions, &Vec::<Distribution>::new(&env));
     }
 
-    /// Distribute profit proportionally based on each member's share weight.
+    /// Distributes profits to members based on their share weights.
     ///
-    /// `recipients` and `shares` must be equal length.
-    /// Each member receives: `profit * (member_shares / total_shares)`
+    /// Requires equal-length `recipients` and `shares` vectors. Each member receives:
+    /// `profit * (member_shares / total_shares)`.
+    ///
+    /// # Authorization
+    /// * The `admin` must authorize and be the registered admin.
+    ///
+    /// # Panics
+    /// * If `recipients` and `shares` lengths differ.
+    /// * If `total_profit` is not positive.
+    /// * If total shares sum to zero.
+    /// * If caller is not admin.
+    ///
+    /// # Events
+    /// * Emits `dividend_distributed` with distribution ID, total profit, and recipient count.
+    ///
+    /// # Return
+    /// * ID of the created distribution.
     pub fn distribute(
         env: Env,
         admin: Address,
@@ -75,7 +108,6 @@ impl DividendContract {
         let token_client = token::Client::new(&env, &asset);
 
         let mut amounts: Vec<i128> = Vec::new(&env);
-
         for i in 0..recipients.len() {
             let member_shares = shares.get(i).unwrap();
             let payout = (total_profit * member_shares) / total_shares;
@@ -116,22 +148,29 @@ impl DividendContract {
         id
     }
 
+    /// Retrieves all recorded distributions.
+    ///
+    /// # Authorization
+    /// * None (public read-only access).
+    ///
+    /// # Panics
+    /// * Does not panic; returns empty vector if none exist.
+    ///
+    /// # Events
+    /// * None.
+    ///
+    /// # Return
+    /// * Vector of all [`Distribution`] records.
     pub fn get_distributions(env: Env) -> Vec<Distribution> {
         env.storage().instance()
             .get(&DataKey::Distributions)
             .unwrap_or(Vec::new(&env))
     }
 
-    /// Bump the instance storage TTL to prevent the contract from expiring.
-    /// Called at the start of every state-changing function.
+    /// Verifies caller is the registered admin.
     ///
-    /// Threshold: 30 days (518,400 ledgers); Extend to: 180 days (3,110,400 ledgers).
-    fn bump_instance(env: &Env) {
-        env.storage()
-            .instance()
-            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
-    }
-
+    /// # Panics
+    /// * If caller is not admin.
     fn require_admin(env: &Env, caller: &Address) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         if admin != *caller { panic!("unauthorized"); }
