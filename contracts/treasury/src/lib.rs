@@ -1,10 +1,13 @@
 #![no_std]
 
+//! Treasury Management Module
+//!
+//! Manages member contributions, group administration, and treasury balances.
+//! Handles USDC transfers and member lifecycle (add/remove).
+
 use soroban_sdk::{
     contract, contractimpl, contracttype, token, Address, Env, Symbol, Vec, String,
 };
-
-/// ─── Storage Keys ────────────────────────────────────────────────────────────
 
 #[contracttype]
 #[derive(Clone)]
@@ -17,8 +20,6 @@ pub enum DataKey {
     AssetAddress,
     IsActive,
 }
-
-/// ─── Types ───────────────────────────────────────────────────────────────────
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -51,8 +52,6 @@ pub struct MemberSummary {
     pub last_contributed_at: u64,
 }
 
-/// ─── Contract ────────────────────────────────────────────────────────────────
-
 #[contract]
 pub struct TreasuryContract;
 
@@ -65,7 +64,6 @@ impl TreasuryContract {
         asset: Address,
     ) -> GroupInfo {
         admin.require_auth();
-
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
         }
@@ -167,7 +165,7 @@ impl TreasuryContract {
         };
 
         let mut history: Vec<ContributionRecord> = env
-            .storage().persistent()
+            .storage().instance()
             .get(&DataKey::Contributions(member.clone()))
             .unwrap_or(Vec::new(&env));
         history.push_back(record);
@@ -338,25 +336,23 @@ impl TreasuryContract {
             (0, 0)
         };
 
-        MemberSummary {
-            address: member,
-            is_member,
-            total_contributed,
-            contribution_count,
-            last_period,
-            last_contributed_at,
+        GroupInfo {
+            name,
+            admin,
+            asset,
+            total_contributions: total,
+            member_count: members.len() as u32,
+            is_active,
         }
     }
 
-    // ── Internal helpers ─────────────────────────────────────────────────────
-
+    /// Verifies caller is admin.
     fn require_admin(env: &Env, caller: &Address) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        if admin != *caller {
-            panic!("unauthorized: admin only");
-        }
+        if admin != *caller { panic!("unauthorized admin"); }
     }
 
+    /// Verifies caller is a member.
     fn require_member(env: &Env, caller: &Address) {
         let members: Vec<Address> = env.storage().instance()
             .get(&DataKey::Members)
