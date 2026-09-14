@@ -97,6 +97,7 @@ impl VotingContract {
         env.storage().instance().set(&DataKey::TreasuryContract, &treasury);
         env.storage().instance().set(&DataKey::ProposalCounter, &0u32);
         env.storage().instance().set(&DataKey::Proposals, &Vec::<Proposal>::new(&env));
+        Self::bump_instance(&env);
     }
 
     /// Creates a new proposal (member-only).
@@ -154,6 +155,11 @@ impl VotingContract {
 
         env.storage().persistent()
             .set(&DataKey::Votes(id), &Map::<Address, bool>::new(&env));
+        env.storage().persistent().extend_ttl(
+            &DataKey::Votes(id),
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_BUMP_LEDGERS,
+        );
 
         // Extend TTL for the new vote entry so it survives the full
         // voting period plus a grace window after finalization.
@@ -208,6 +214,11 @@ impl VotingContract {
         }
         votes.set(voter, approve);
         env.storage().persistent().set(&DataKey::Votes(proposal_id), &votes);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Votes(proposal_id),
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_BUMP_LEDGERS,
+        );
 
         // Extend TTL for the vote map so tally records survive through
         // the voting window and the post-finalization query period.

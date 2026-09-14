@@ -75,6 +75,8 @@ impl TreasuryContract {
         env.storage().instance().set(&DataKey::IsActive, &true);
         env.storage().instance().set(&DataKey::Members, &Vec::<Address>::new(&env));
 
+        Self::bump_instance(&env);
+
         GroupInfo {
             name: group_name,
             admin,
@@ -173,6 +175,12 @@ impl TreasuryContract {
         history.push_back(record);
         env.storage().persistent()
             .set(&DataKey::Contributions(member.clone()), &history);
+        // Keep this member's contribution history alive against TTL eviction.
+        env.storage().persistent().extend_ttl(
+            &DataKey::Contributions(member.clone()),
+            PERSISTENT_TTL_THRESHOLD,
+            PERSISTENT_BUMP_LEDGERS,
+        );
 
         let total: i128 = env.storage().instance()
             .get(&DataKey::TotalContributions).unwrap_or(0);

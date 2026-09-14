@@ -63,6 +63,7 @@ impl DividendContract {
         env.storage().instance().set(&DataKey::DistributionCounter, &0u32);
         env.storage().instance()
             .set(&DataKey::Distributions, &Vec::<Distribution>::new(&env));
+        Self::bump_instance(&env);
     }
 
     /// Distributes profits to members based on their share weights.

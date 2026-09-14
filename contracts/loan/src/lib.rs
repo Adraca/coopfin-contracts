@@ -83,6 +83,7 @@ impl LoanContract {
         env.storage().instance().set(&DataKey::AssetAddress, &asset);
         env.storage().instance().set(&DataKey::LoanCounter, &0u32);
         env.storage().instance().set(&DataKey::Loans, &Vec::<Loan>::new(&env));
+        Self::bump_instance(&env);
     }
 
     /// Submits a loan request (member-only).

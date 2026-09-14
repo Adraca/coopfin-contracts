@@ -78,6 +78,7 @@ impl GovernanceContract {
             late_penalty_bps: 200,
         };
         env.storage().instance().set(&DataKey::Rules, &rules);
+        Self::bump_instance(&env);
     }
 
     /// Updates cooperative rules (admin-only).
