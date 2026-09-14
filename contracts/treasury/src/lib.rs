@@ -88,6 +88,7 @@ impl TreasuryContract {
     pub fn add_member(env: Env, admin: Address, member: Address) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::bump_instance(&env);
 
         let mut members: Vec<Address> = env
             .storage().instance()
@@ -147,6 +148,7 @@ impl TreasuryContract {
     pub fn contribute(env: Env, member: Address, amount: i128, period: u32) {
         member.require_auth();
         Self::require_member(&env, &member);
+        Self::bump_instance(&env);
 
         if amount <= 0 {
             panic!("amount must be positive");
@@ -267,6 +269,7 @@ impl TreasuryContract {
     pub fn withdraw(env: Env, admin: Address, to: Address, amount: i128) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::bump_instance(&env);
 
         let asset: Address = env.storage().instance().get(&DataKey::AssetAddress).unwrap();
         let token_client = token::Client::new(&env, &asset);

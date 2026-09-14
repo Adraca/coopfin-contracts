@@ -9,6 +9,11 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, token, Address, Env, String, Symbol, Vec,
 };
 
+/// ─── TTL Constants ──────────────────────────────────────────────────────────
+const LEDGERS_PER_DAY: u32 = 17_280;
+const INSTANCE_TTL_THRESHOLD: u32 = 30 * LEDGERS_PER_DAY;
+const INSTANCE_TTL_EXTEND_TO: u32 = 180 * LEDGERS_PER_DAY;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -51,6 +56,7 @@ impl DividendContract {
     /// * None.
     pub fn initialize(env: Env, admin: Address, asset: Address, treasury: Address) {
         admin.require_auth();
+        Self::bump_instance(&env);
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::AssetAddress, &asset);
         env.storage().instance().set(&DataKey::TreasuryContract, &treasury);
@@ -88,6 +94,7 @@ impl DividendContract {
     ) -> u32 {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::bump_instance(&env);
 
         if recipients.len() != shares.len() {
             panic!("recipients and shares length mismatch");

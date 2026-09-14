@@ -9,6 +9,11 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, Address, Env, Symbol,
 };
 
+/// ─── TTL Constants ──────────────────────────────────────────────────────────
+const LEDGERS_PER_DAY: u32 = 17_280;
+const INSTANCE_TTL_THRESHOLD: u32 = 30 * LEDGERS_PER_DAY;
+const INSTANCE_TTL_EXTEND_TO: u32 = 180 * LEDGERS_PER_DAY;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
@@ -57,6 +62,7 @@ impl GovernanceContract {
         treasury: Address,
     ) {
         admin.require_auth();
+        Self::bump_instance(&env);
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::VotingContract, &voting);
         env.storage().instance().set(&DataKey::LoanContract, &loan);
@@ -90,6 +96,7 @@ impl GovernanceContract {
     pub fn update_rules(env: Env, admin: Address, rules: CoopRules) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
+        Self::bump_instance(&env);
         env.storage().instance().set(&DataKey::Rules, &rules);
         env.events().publish((Symbol::new(&env, "rules_updated"),), ());
     }
