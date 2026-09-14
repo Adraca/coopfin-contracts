@@ -6,7 +6,7 @@
 //! proportionally based on member share weights, records distributions, and emits events.
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, Env, Symbol, Vec,
+    contract, contractimpl, contracttype, token, Address, Env, String, Symbol, Vec,
 };
 
 #[contracttype]
