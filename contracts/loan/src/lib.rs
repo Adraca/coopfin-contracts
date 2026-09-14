@@ -1,20 +1,23 @@
 #![no_std]
 
+//! Loan Management Module
+//!
+//! Handles member loan requests, approvals, and disbursements. Integrates with treasury
+//! for fund distribution and governance for approvals.
+
 use soroban_sdk::{
     contract, contractimpl, contracttype, token, Address, Env, Symbol, Vec, String,
 };
 
-/// ─── Storage TTL ─────────────────────────────────────────────────────────────
-///
-/// Soroban charges rent on stored entries and evicts them once their TTL
-/// elapses unless bumped. This contract keeps loan state in instance storage,
-/// so it is extended at the start of every state-changing call. Stellar closes
-/// a ledger roughly every 5 seconds (one day ≈ 17_280 ledgers); instance state
-/// is kept alive for ~30 days, with the threshold one day below the target so a
-/// bump only pays rent when the entry is within a day of expiry.
-const DAY_IN_LEDGERS: u32 = 17_280;
-const INSTANCE_BUMP_LEDGERS: u32 = 30 * DAY_IN_LEDGERS;
-const INSTANCE_TTL_THRESHOLD: u32 = INSTANCE_BUMP_LEDGERS - DAY_IN_LEDGERS;
+/// ─── TTL Constants ──────────────────────────────────────────────────────────
+/// Number of ledgers in one day (approximate, based on ~5s ledger close time).
+const LEDGERS_PER_DAY: u32 = 17_280;
+
+/// Extend instance storage TTL when it drops below this threshold (30 days).
+const INSTANCE_TTL_THRESHOLD: u32 = 30 * LEDGERS_PER_DAY;
+
+/// Extend instance storage TTL to this many ledgers (180 days ≈ 6 months).
+const INSTANCE_TTL_EXTEND_TO: u32 = 180 * LEDGERS_PER_DAY;
 
 #[contracttype]
 #[derive(Clone)]
@@ -29,11 +32,11 @@ pub enum DataKey {
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub enum LoanStatus {
-    Pending,   // Awaiting approval vote
-    Approved,  // Disbursed
-    Repaid,    // Fully repaid
-    Rejected,  // Rejected by governance
-    Defaulted, // Past due date, not repaid
+    Pending,
+    Approved,
+    Repaid,
+    Rejected,
+    Defaulted,
 }
 
 #[contracttype]
@@ -42,8 +45,8 @@ pub struct Loan {
     pub id: u32,
     pub borrower: Address,
     pub amount: i128,
-    pub interest_bps: u32,      // basis points, e.g. 500 = 5%
-    pub repayment_due: u64,     // ledger timestamp deadline
+    pub interest_bps: u32,
+    pub repayment_due: u64,
     pub amount_repaid: i128,
     pub status: LoanStatus,
     pub purpose: String,
@@ -56,8 +59,22 @@ pub struct LoanContract;
 
 #[contractimpl]
 impl LoanContract {
+    /// Initializes loan contract with admin, treasury, and asset.
+    ///
+    /// # Authorization
+    /// * The `admin` must authorize.
+    ///
+    /// # Panics
+    /// * If already initialized.
+    ///
+    /// # Events
+    /// * None.
+    ///
+    /// # Return
+    /// * None.
     pub fn initialize(env: Env, admin: Address, treasury: Address, asset: Address) {
         admin.require_auth();
+        Self::bump_instance(&env);
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
         }
@@ -69,7 +86,19 @@ impl LoanContract {
         Self::bump_instance(&env);
     }
 
-    /// Member submits a loan request.
+    /// Submits a loan request (member-only).
+    ///
+    /// # Authorization
+    /// * The `borrower` must authorize.
+    ///
+    /// # Panics
+    /// * If amount is non-positive.
+    ///
+    /// # Events
+    /// * Emits `loan_requested` with ID, borrower, and amount.
+    ///
+    /// # Return
+    /// * Requested loan ID.
     pub fn request_loan(
         env: Env,
         borrower: Address,
@@ -85,14 +114,13 @@ impl LoanContract {
             .get(&DataKey::LoanCounter).unwrap_or(0);
         let id = counter + 1;
 
-        let seconds_per_day: u64 = 86_400;
-        let due = env.ledger().timestamp() + (repayment_days as u64 * seconds_per_day);
+        let due = env.ledger().timestamp() + (repayment_days as u64 * 86_400);
 
         let loan = Loan {
             id,
             borrower: borrower.clone(),
             amount,
-            interest_bps: 500, // 5% flat — governance can change this
+            interest_bps: 500,
             repayment_due: due,
             amount_repaid: 0,
             status: LoanStatus::Pending,
@@ -114,20 +142,30 @@ impl LoanContract {
         id
     }
 
-    /// Admin (or governance contract) approves a loan and disburses funds.
+    /// Approves and disburses a loan (admin-only).
+    ///
+    /// # Authorization
+    /// * The `admin` must authorize and be registered admin.
+    ///
+    /// # Panics
+    /// * If loan not found or not pending.
+    ///
+    /// # Events
+    /// * None.
+    ///
+    /// # Return
+    /// * None.
     pub fn approve_loan(env: Env, admin: Address, loan_id: u32) {
         admin.require_auth();
         Self::require_admin(&env, &admin);
         Self::bump_instance(&env);
 
-        let mut loans: Vec<Loan> = env.storage().instance()
-            .get(&DataKey::Loans).unwrap();
-
+        let mut loans: Vec<Loan> = env.storage().instance().get(&DataKey::Loans).unwrap();
         let idx = Self::find_loan_idx(&loans, loan_id);
         let mut loan = loans.get(idx).unwrap();
 
         if loan.status != LoanStatus::Pending {
-            panic!("loan is not pending");
+            panic!("loan not pending");
         }
 
         loan.status = LoanStatus::Approved;
@@ -135,18 +173,12 @@ impl LoanContract {
         loans.set(idx, loan.clone());
         env.storage().instance().set(&DataKey::Loans, &loans);
 
-        // Disburse from treasury
         let asset: Address = env.storage().instance().get(&DataKey::AssetAddress).unwrap();
         let token_client = token::Client::new(&env, &asset);
         token_client.transfer(
             &env.current_contract_address(),
             &loan.borrower,
             &loan.amount,
-        );
-
-        env.events().publish(
-            (Symbol::new(&env, "loan_approved"),),
-            (loan_id, loan.borrower, loan.amount),
         );
     }
 
@@ -188,6 +220,68 @@ impl LoanContract {
         );
     }
 
+    /// Marks a loan as defaulted if it is past due and has pending balance.
+    ///
+    /// # Authorization
+    /// Anyone can call this function (community enforcement).
+    ///
+    /// # Arguments
+    /// * `loan_id` - The ID of the loan to mark as defaulted
+    ///
+    /// # Panics
+    /// - If loan does not exist
+    /// - If loan is not in `Approved` status
+    /// - If loan is not past due (`repayment_due` > current ledger timestamp)
+    /// - If loan has been fully repaid
+    ///
+    /// # Events
+    /// Emits `loan_defaulted` with loan_id, borrower, and pending_amount.
+    pub fn mark_defaulted(env: Env, loan_id: u32) {
+        // 1. Obtener todos los préstamos
+        let mut loans: Vec<Loan> = env.storage().instance()
+            .get(&DataKey::Loans).unwrap_or_else(|| panic!("no loans found"));
+
+        // 2. Encontrar el índice del préstamo
+        let idx = Self::find_loan_idx(&loans, loan_id);
+        let mut loan = loans.get(idx).unwrap();
+
+        // 3. Validar que el préstamo está en estado Approved
+        if loan.status != LoanStatus::Approved {
+            panic!("loan must be in Approved status");
+        }
+
+        // 4. Validar que el préstamo está vencido
+        let current_timestamp = env.ledger().timestamp();
+        if current_timestamp <= loan.repayment_due {
+            panic!("loan is not past due");
+        }
+
+        // 5. Validar que hay saldo pendiente
+        let total_due = loan.amount + (loan.amount * loan.interest_bps as i128 / 10_000);
+        if loan.amount_repaid >= total_due {
+            panic!("loan has been fully repaid");
+        }
+
+        // 6. Calcular el monto pendiente
+        let pending_amount = total_due - loan.amount_repaid;
+
+        // 7. Actualizar el estado a Defaulted
+        loan.status = LoanStatus::Defaulted;
+
+        // 8. Guardar el préstamo actualizado
+        loans.set(idx, loan.clone());
+        env.storage().instance().set(&DataKey::Loans, &loans);
+
+        // 9. Emitir el evento
+        env.events().publish(
+            (Symbol::new(&env, "loan_defaulted"),),
+            (loan_id, loan.borrower, pending_amount),
+        );
+
+        // 10. Extender TTL del storage de instancia (100 ledgers)
+        env.storage().instance().extend_ttl(100, 100);
+    }
+
     /// Get all loans.
     pub fn get_loans(env: Env) -> Vec<Loan> {
         env.storage().instance()
@@ -195,33 +289,200 @@ impl LoanContract {
             .unwrap_or(Vec::new(&env))
     }
 
-    /// Get a single loan by ID.
-    pub fn get_loan(env: Env, loan_id: u32) -> Loan {
-        let loans: Vec<Loan> = env.storage().instance()
-            .get(&DataKey::Loans).unwrap();
-        let idx = Self::find_loan_idx(&loans, loan_id);
-        loans.get(idx).unwrap()
+    /// Finds loan index by ID.
+    fn find_loan_idx(loans: &Vec<Loan>, id: u32) -> usize {
+        loans.iter().position(|loan| loan.id == id).unwrap()
     }
 
-    /// Extend the contract's instance-storage TTL. Called at the start of every
-    /// state-changing entrypoint so active loan records are never evicted.
-    fn bump_instance(env: &Env) {
-        env.storage()
-            .instance()
-            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_BUMP_LEDGERS);
-    }
-
+    /// Verifies caller is admin.
     fn require_admin(env: &Env, caller: &Address) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         if admin != *caller { panic!("unauthorized"); }
     }
+}
 
-    fn find_loan_idx(loans: &Vec<Loan>, id: u32) -> u32 {
-        for i in 0..loans.len() {
-            if loans.get(i).unwrap().id == id {
-                return i;
-            }
-        }
-        panic!("loan not found");
+/// ─── Tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::{token::Client as TokenClient, token::StellarAssetClient, Env};
+
+    fn setup() -> (Env, LoanContractClient<'static>, Address, Address, Address) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, LoanContract);
+        let client = LoanContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let borrower = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let asset = env.register_stellar_asset_contract_v2(token_admin.clone());
+        let asset_address = asset.address();
+
+        // Fund borrower
+        StellarAssetClient::new(&env, &asset_address)
+            .mint(&borrower, &100_000_0000000i128);
+
+        // Fund the contract itself (treasury) for disbursement
+        StellarAssetClient::new(&env, &asset_address)
+            .mint(&contract_id, &100_000_0000000i128);
+
+        // Initialize contract
+        client.initialize(&admin, &admin, &asset_address);
+
+        (env, client, admin, borrower, asset_address)
+    }
+
+    fn create_approved_loan(
+        env: &Env,
+        client: &LoanContractClient<'static>,
+        admin: &Address,
+        borrower: &Address,
+    ) -> u32 {
+        // Request loan
+        let loan_id = client.request_loan(
+            borrower,
+            &10_000_0000000i128,
+            &String::from_str(env, "Test loan"),
+            &30, // 30 days
+        );
+
+        // Approve loan (disburses funds)
+        client.approve_loan(admin, &loan_id);
+
+        loan_id
+    }
+
+    #[test]
+    fn test_initialize() {
+        // setup() already initializes, so we just verify no panic
+        let (env, client, admin, _, asset) = setup();
+        // Verify contract is initialized by checking loans exist
+        let loans = client.get_loans();
+        assert_eq!(loans.len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "already initialized")]
+    fn test_double_initialize() {
+        let (env, client, admin, _, asset) = setup();
+        // Try to initialize again
+        client.initialize(&admin, &admin, &asset);
+    }
+
+    #[test]
+    fn test_request_loan() {
+        let (env, client, _, borrower, _) = setup();
+        let loan_id = client.request_loan(
+            &borrower,
+            &1_000_0000000i128,
+            &String::from_str(&env, "Test loan"),
+            &30,
+        );
+        assert_eq!(loan_id, 1);
+    }
+
+    #[test]
+    fn test_approve_loan() {
+        let (env, client, admin, borrower, _) = setup();
+        let loan_id = client.request_loan(
+            &borrower,
+            &10_000_0000000i128,
+            &String::from_str(&env, "Test loan"),
+            &30,
+        );
+        client.approve_loan(&admin, &loan_id);
+        let loan = client.get_loan(&loan_id);
+        assert_eq!(loan.status, LoanStatus::Approved);
+    }
+
+    #[test]
+    fn test_repay_loan() {
+        let (env, client, admin, borrower, _) = setup();
+        let loan_id = create_approved_loan(&env, &client, &admin, &borrower);
+
+        // Calculate total due (5% interest)
+        let principal = 10_000_0000000i128;
+        let interest = principal * 500 / 10_000;
+        let total_due = principal + interest;
+
+        // Repay loan
+        client.repay(&borrower, &loan_id, &total_due);
+
+        let loan = client.get_loan(&loan_id);
+        assert_eq!(loan.status, LoanStatus::Repaid);
+    }
+
+    // ── mark_defaulted tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_mark_defaulted_success() {
+        let (env, client, admin, borrower, _) = setup();
+        let loan_id = create_approved_loan(&env, &client, &admin, &borrower);
+
+        // Advance time past repayment_due (30 days)
+        env.ledger().with_mut(|l| l.timestamp = 1_700_000_000);
+
+        // Mark as defaulted
+        client.mark_defaulted(&loan_id);
+
+        // Verify status
+        let loan = client.get_loan(&loan_id);
+        assert_eq!(loan.status, LoanStatus::Defaulted);
+    }
+
+    #[test]
+    #[should_panic(expected = "loan is not past due")]
+    fn test_mark_defaulted_not_past_due() {
+        let (env, client, admin, borrower, _) = setup();
+        let loan_id = create_approved_loan(&env, &client, &admin, &borrower);
+
+        // Don't advance time -> loan is not past due
+        client.mark_defaulted(&loan_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "loan must be in Approved status")]
+    fn test_mark_defaulted_already_repaid() {
+        let (env, client, admin, borrower, _) = setup();
+        let loan_id = create_approved_loan(&env, &client, &admin, &borrower);
+
+        // Calculate total due (5% interest)
+        let principal = 10_000_0000000i128;
+        let interest = principal * 500 / 10_000;
+        let total_due = principal + interest;
+
+        // Repay the loan
+        client.repay(&borrower, &loan_id, &total_due);
+
+        // Advance time
+        env.ledger().with_mut(|l| l.timestamp = 1_700_000_000);
+
+        // Try to mark as defaulted (should fail because already repaid)
+        client.mark_defaulted(&loan_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "loan not found")]
+    fn test_mark_defaulted_loan_not_found() {
+        let (env, client, _, _, _) = setup();
+        client.mark_defaulted(&999);
+    }
+
+    // ── edge cases ──────────────────────────────────────────────────────────────
+
+    #[test]
+    #[should_panic]
+    fn test_approve_nonexistent_loan() {
+        let (env, client, admin, _, _) = setup();
+        client.approve_loan(&admin, &999);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_repay_nonexistent_loan() {
+        let (env, client, _, borrower, _) = setup();
+        client.repay(&borrower, &999, &100);
     }
 }
